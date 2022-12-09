@@ -1,3 +1,4 @@
 openai==0.25.0
 slack-bolt==1.16.0
 watchdog==2.2.0
+python-dotenv==0.21.0
