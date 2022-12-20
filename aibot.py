@@ -6,7 +6,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import openai
 from dotenv import load_dotenv
-
+from slack_sdk.errors import SlackApiError
 
 # setup
 logging.basicConfig(level=logging.DEBUG)
@@ -42,38 +42,36 @@ def ai(ack, respond, command):
 
     formatted_prompt = f"{command['user_name']} asked: /ai {command['text']}"
     response = get_text(prompt)
-
+    attachment = {
+        "text": response,
+        "callback_id": "public_repost",
+        "color": "#3AA3E3",
+    }
+    # only show "Post publicly" button if message not already public, and we're not in a DM where we can't post
+    if response_type == "ephemeral" and command["channel_name"] != "directmessage":
+        attachment["actions"] = [{
+            "name": "say",
+            "text": "Post publicly",
+            "type": "button",
+            "value": json.dumps({"prompt": formatted_prompt, "response": response}),
+        }]
     respond(
         formatted_prompt,
         response_type=response_type,
-        attachments=[
-            {
-                "text": response,
-                "callback_id": "public_repost",
-                "color": "#3AA3E3",
-                "actions": [
-                    {
-                        "name": "say",
-                        "text": "Post publicly",
-                        "type": "button",
-                        "value": json.dumps({"prompt": formatted_prompt, "response": response}),
-                    },
-                ],
-            }
-        ]
+        attachments=[attachment],
     )
 
 @app.action("public_repost")
 def public_repost(ack, payload, respond, say):
     ack()
     to_repost = json.loads(payload['value'])
-    respond(text='', replace_original=True, delete_original=True)
     say(to_repost["prompt"], response_type="in_channel", attachments=[
         {
             "text": to_repost["response"],
             "color": "#3AA3E3",
         }
     ])
+    respond(text='', replace_original=True, delete_original=True)
 
 if __name__ == "__main__":
     handler = SocketModeHandler(app)
