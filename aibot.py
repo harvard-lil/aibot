@@ -1,3 +1,4 @@
+import json
 import os
 import logging
 
@@ -33,22 +34,47 @@ def ai(ack, respond, command):
     logger.debug(command)
     ack()
 
-    def show_prompt_response(text):
-        respond(
-            f"{text}" +
-            ('\n_visible only to you_' if response_type == 'ephemeral' else ''),
-            response_type=response_type)
-
     response_type = "ephemeral"
     prompt = command['text']
     if prompt.split(maxsplit=1)[0] == "say":
         response_type = "in_channel"
         prompt = prompt.split(maxsplit=1)[1]
 
-    show_prompt_response(f"{command['user_name']} _/ai {command['text']}_\n{get_text(prompt)}")
+    formatted_prompt = f"{command['user_name']} asked: /ai {command['text']}"
+    response = get_text(prompt)
 
+    respond(
+        formatted_prompt,
+        response_type=response_type,
+        attachments=[
+            {
+                "text": response,
+                "callback_id": "public_repost",
+                "color": "#3AA3E3",
+                "actions": [
+                    {
+                        "name": "say",
+                        "text": "Post publicly",
+                        "type": "button",
+                        "value": json.dumps({"prompt": formatted_prompt, "response": response}),
+                    },
+                ],
+            }
+        ]
+    )
+
+@app.action("public_repost")
+def public_repost(ack, payload, respond, say):
+    ack()
+    to_repost = json.loads(payload['value'])
+    respond(text='', replace_original=True, delete_original=True)
+    say(to_repost["prompt"], response_type="in_channel", attachments=[
+        {
+            "text": to_repost["response"],
+            "color": "#3AA3E3",
+        }
+    ])
 
 if __name__ == "__main__":
-    # Create an app-level token with connections:write scope
     handler = SocketModeHandler(app)
     handler.start()
