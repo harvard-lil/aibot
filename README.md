@@ -1,4 +1,6 @@
-Slack bot for connecting LIL slack to OpenAI endpoints.
+![Dall-E generated image of a logo with books inside a brain, and the text 'AbbyLarby'](abbylarby.svg)
+
+AbbyLarby is a Slack bot for connecting to generative AI helpers.
 
 Features
 ---
