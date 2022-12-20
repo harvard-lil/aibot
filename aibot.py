@@ -111,7 +111,7 @@ def handle_dm(ack, payload, logger, say):
     formatted_messages = []
     max_prompt_length = 1000  # characters
     stop_tokens = set()  # list of stop tokens to stop it from generating replies to itself
-    for message in reversed(messages):
+    for message in messages:
         if message['text'] == "reset":
             # given bare "reset" message, ignore previous messages
             break
@@ -119,7 +119,7 @@ def handle_dm(ack, payload, logger, say):
         readable_age = readable_timedelta(time.time() - int(float(message["ts"])))
         formatted_messages.append(f"<{user_name} | {readable_age} ago>: {message['text']}")
         stop_tokens.add(f"<{user_name} |")
-    messages.reverse()
+    formatted_messages.reverse()
     my_user_name = id_to_user_name(my_user_id)
     stop_tokens.add(f"<{my_user_name} |")
 
