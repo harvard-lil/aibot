@@ -29,6 +29,8 @@ OPENAI_IMG_PARAMS = {
     "n": 1,
     "size": "1024x1024",
 }
+cache_seconds = 60
+cache_last_reset = 0
 cached_user_info = {}
 cached_team_fields = {}
 
@@ -52,6 +54,14 @@ def block_text(text):
     }
 
 def id_to_user_info(user_id):
+    global cache_last_reset
+
+    # reset cache every cache_seconds seconds
+    if cache_last_reset < time.time() - cache_seconds:
+        cache_last_reset = time.time()
+        cached_user_info.clear()
+
+    # fetch data for this user if not cached
     if user_id not in cached_user_info:
         if not cached_team_fields:
             team_profile = app.client.team_profile_get()
@@ -60,8 +70,10 @@ def id_to_user_info(user_id):
         user_info = {k: user_profile.get(k) for k in ['real_name', 'display_name', 'first_name', 'last_name', 'title', 'status_text', 'status_emoji', 'pronouns']}
         for label_id, label in cached_team_fields.items():
             user_info[label] = user_profile["fields"].get(label_id, {'value': ''})['value']
-        user_info = {k: v for k, v in user_info.items() if v}
+        # privacy filter -- ignore all but these fields
+        user_info = {k: v for k, v in user_info.items() if v and k in ['first_name', 'pronouns', 'Info for AbbyLarby']}
         cached_user_info[user_id] = user_info
+
     return cached_user_info[user_id]
 
 def readable_timedelta(seconds):
@@ -159,7 +171,7 @@ def handle_dm(ack, payload, logger, say):
     latest_message = payload["text"]
     if latest_message == "help":
         say(dedent(f"""
-            I'm {my_user_info['real_name']}, a friendly, helpful AI bot. You can just talk to me, or I'll do special things if you send one of these messages:
+            I'm {my_user_info['first_name']}, a friendly, helpful AI bot. You can just talk to me, or I'll do special things if you send one of these messages:
             * `reset`: I'll ignore anything we said before this message.
             * `prompt`: I'll show the entire prompt I would have used to generate a response.
         """))
@@ -173,23 +185,26 @@ def handle_dm(ack, payload, logger, say):
         for message in messages:
             if message['text'] == "reset":
                 break
+            if message['text'] == "prompt" or (message['user'] == my_user_id and message['text'].startswith('```')):
+                # skip previous prompt inspections
+                continue
             user_info = users_in_convo[message["user"]] = id_to_user_info(message['user'])
-            user_name = user_info['real_name']
+            user_name = user_info['first_name']
             readable_age = readable_timedelta(time.time() - int(float(message["ts"])))
             formatted_messages.append(f"<{user_name} | {readable_age} ago>: {message['text']}")
 
     # list of stop tokens to stop it from generating replies to itself
-    stop_tokens = [f"<{user_info['real_name']} |" for user_info in users_in_convo.values()]
+    stop_tokens = [f"<{user_info['first_name']} |" for user_info in users_in_convo.values()]
 
     # list of user bios
     bios = "* " + "\n*".join(
-        user_info["real_name"] + ": " +
-        " ".join(f"{k} is {v}." for k, v in user_info.items() if k != "real_name")
+        user_info["first_name"] + ": " +
+        " ".join(f'{k} is "{v}".' for k, v in user_info.items() if k != "first_name")
         for user_info in users_in_convo.values()
     )
 
     # list of messages
-    max_prompt_length = 1000  # characters
+    max_prompt_length = 2000  # characters
     history_text = ""
     for message in formatted_messages:
         history_text = f"\n{message}{history_text}"
@@ -198,13 +213,13 @@ def handle_dm(ack, payload, logger, say):
 
     # fetch OpenAI response
     prompt = f"""
-This is a conversation with {my_user_info['real_name']}, a friendly, helpful AI bot.
+This is a conversation with {my_user_info['first_name']}, a friendly, helpful AI bot.
 Today is {date.today().strftime("%A, %B %-d, %Y.")}
 
 These are the people in the conversation:
 {bios}
 {history_text}
-<{my_user_info['real_name']} | now>:
+<{my_user_info['first_name']} | now>:
     """.strip()
     if latest_message == "prompt":
         response = f"```{prompt.replace('```', '')}```"
