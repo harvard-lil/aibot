@@ -2,6 +2,7 @@ import json
 import os
 import logging
 import time
+from datetime import date
 from textwrap import dedent
 
 from slack_bolt import App
@@ -28,7 +29,8 @@ OPENAI_IMG_PARAMS = {
     "n": 1,
     "size": "1024x1024",
 }
-cached_user_names = {}
+cached_user_info = {}
+cached_team_fields = {}
 
 ### helpers ###
 
@@ -49,11 +51,18 @@ def block_text(text):
         "text": text,
     }
 
-def id_to_user_name(user_id):
-    if user_id not in cached_user_names:
-        user_info = app.client.users_info(user=user_id)
-        cached_user_names[user_id] = user_info.data['user']['real_name']
-    return cached_user_names[user_id]
+def id_to_user_info(user_id):
+    if user_id not in cached_user_info:
+        if not cached_team_fields:
+            team_profile = app.client.team_profile_get()
+            cached_team_fields.update({f["id"]: f["label"] for f in team_profile["profile"]["fields"]})
+        user_profile = app.client.users_profile_get(user=user_id)["profile"]
+        user_info = {k: user_profile.get(k) for k in ['real_name', 'display_name', 'first_name', 'last_name', 'title', 'status_text', 'status_emoji', 'pronouns']}
+        for label_id, label in cached_team_fields.items():
+            user_info[label] = user_profile["fields"].get(label_id, {'value': ''})['value']
+        user_info = {k: v for k, v in user_info.items() if v}
+        cached_user_info[user_id] = user_info
+    return cached_user_info[user_id]
 
 def readable_timedelta(seconds):
     # via https://codereview.stackexchange.com/a/245215
@@ -144,32 +153,63 @@ def handle_dm(ack, payload, logger, say):
     """Handle conversations with the app itself."""
     ack()
 
+    users_in_convo = {id: id_to_user_info(id) for id in [payload['user'], my_user_id]}
+    my_user_info = users_in_convo[my_user_id]
+
+    latest_message = payload["text"]
+    if latest_message == "help":
+        say(dedent(f"""
+            I'm {my_user_info['real_name']}, a friendly, helpful AI bot. You can just talk to me, or I'll do special things if you send one of these messages:
+            * `reset`: I'll ignore anything we said before this message.
+            * `prompt`: I'll show the entire prompt I would have used to generate a response.
+        """))
+        return
+
     # fetch previous slack messages in conversation, and turn into prompts like "<User Name | 3 minutes ago>: message"
-    messages = app.client.conversations_history(channel=payload["channel"])
-    messages = messages.data["messages"]
     formatted_messages = []
+    if latest_message != "reset":
+        messages = app.client.conversations_history(channel=payload["channel"])
+        messages = messages.data["messages"]
+        for message in messages:
+            if message['text'] == "reset":
+                break
+            user_info = users_in_convo[message["user"]] = id_to_user_info(message['user'])
+            user_name = user_info['real_name']
+            readable_age = readable_timedelta(time.time() - int(float(message["ts"])))
+            formatted_messages.append(f"<{user_name} | {readable_age} ago>: {message['text']}")
+
+    # list of stop tokens to stop it from generating replies to itself
+    stop_tokens = [f"<{user_info['real_name']} |" for user_info in users_in_convo.values()]
+
+    # list of user bios
+    bios = "* " + "\n*".join(
+        user_info["real_name"] + ": " +
+        " ".join(f"{k} is {v}." for k, v in user_info.items() if k != "real_name")
+        for user_info in users_in_convo.values()
+    )
+
+    # list of messages
     max_prompt_length = 1000  # characters
-    stop_tokens = set()  # list of stop tokens to stop it from generating replies to itself
-    for message in messages:
-        if message['text'] == "reset":
-            # given bare "reset" message, ignore previous messages
+    history_text = ""
+    for message in formatted_messages:
+        history_text = f"\n{message}{history_text}"
+        if len(history_text) > max_prompt_length:
             break
-        user_name = id_to_user_name(message["user"])
-        readable_age = readable_timedelta(time.time() - int(float(message["ts"])))
-        formatted_messages.append(f"<{user_name} | {readable_age} ago>: {message['text']}")
-        stop_tokens.add(f"<{user_name} |")
-    formatted_messages.reverse()
-    my_user_name = id_to_user_name(my_user_id)
-    stop_tokens.add(f"<{my_user_name} |")
 
     # fetch OpenAI response
-    prompt = dedent(f"""
-        This is a conversation with {my_user_name}, a friendly, helpful AI bot.
-        
-        {' '.join(formatted_messages)[-max_prompt_length:]}
-        <{my_user_name} | now>:
-    """).strip()
-    response = get_text(prompt, stop=list(stop_tokens))
+    prompt = f"""
+This is a conversation with {my_user_info['real_name']}, a friendly, helpful AI bot.
+Today is {date.today().strftime("%A, %B %-d, %Y.")}
+
+These are the people in the conversation:
+{bios}
+{history_text}
+<{my_user_info['real_name']} | now>:
+    """.strip()
+    if latest_message == "prompt":
+        response = f"```{prompt.replace('```', '')}```"
+    else:
+        response = get_text(prompt, stop=list(stop_tokens))
 
     say(response, response_type="in_channel")
 
