@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import logging
@@ -101,10 +102,25 @@ def readable_timedelta(seconds):
     else:
         return 'less than 1 second'
 
+def respond_errors(func):
+    """Catch errors in handler and post to slack."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_str = f"```Exception handling request:\n{e}\n```"
+            if 'respond' in kwargs:
+                kwargs['respond'](err_str, response_type="ephemeral")
+            elif 'say' in kwargs:
+                kwargs['say'](err_str)
+            raise
+    return wrapper
 
 ### views ###
 
 @app.command("/ai")
+@respond_errors
 def ai(ack, respond, command):
     logger.debug(command)
     ack()
@@ -165,7 +181,8 @@ def ai(ack, respond, command):
     respond(formatted_prompt, response_type=response_type, blocks=blocks)
 
 @app.action("public_repost")
-def public_repost(ack, payload, respond, say):
+@respond_errors
+def public_repost(respond, ack, payload, say):
     """Handle 'Post publicly' button."""
     ack()
     to_repost = json.loads(payload['value'])
@@ -173,12 +190,14 @@ def public_repost(ack, payload, respond, say):
     respond(text='', replace_original=True, delete_original=True)
 
 @app.event("app_mention")
+@respond_errors
 def handle_mention(say, ack, payload):
     """Handle @ mention of AbbyLarby."""
     ack()
     handle_conversation(say, payload, is_dm=False)
 
 @app.event("message")
+@respond_errors
 def handle_dm(ack, payload, say):
     """Handle conversations with the app itself."""
     ack()
