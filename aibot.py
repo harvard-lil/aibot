@@ -212,7 +212,7 @@ def handle_dm(ack, payload, logger, say):
 
     # list of user bios
     bios = "* " + "\n*".join(
-        f'First name: {user_info["first_name"]}. Pronouns: {user_info["pronouns"]}. What you know about this user: "{user_info["Info for AbbyLarby"]}"'
+        f'First name: {user_info["first_name"]}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
         for user_id, user_info in users_in_convo.items() if user_id != my_user_id
     )
 
