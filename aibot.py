@@ -1,6 +1,8 @@
+import functools
 import json
 import os
 import logging
+import re
 import time
 from datetime import date
 from textwrap import dedent
@@ -78,6 +80,15 @@ def id_to_user_info(user_id):
 
     return cached_user_info[user_id]
 
+def hydrate_user_ids(text):
+    def id_to_name(m):
+        user = id_to_user_info(m[1])
+        return f'@{user["display_name"] or user["real_name"]}'
+    return re.sub(r'<@(U[A-Z0-9]{10})>', id_to_name, text)
+
+def is_command(text, command, is_dm):
+    return text == f"@AbbyLarby {command}" or (is_dm and text == command)
+
 def readable_timedelta(seconds):
     # via https://codereview.stackexchange.com/a/245215
     data = {}
@@ -91,10 +102,25 @@ def readable_timedelta(seconds):
     else:
         return 'less than 1 second'
 
+def respond_errors(func):
+    """Catch errors in handler and post to slack."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_str = f"```Exception handling request:\n{e}\n```"
+            if 'respond' in kwargs:
+                kwargs['respond'](err_str, response_type="ephemeral")
+            elif 'say' in kwargs:
+                kwargs['say'](err_str)
+            raise
+    return wrapper
 
 ### views ###
 
 @app.command("/ai")
+@respond_errors
 def ai(ack, respond, command):
     logger.debug(command)
     ack()
@@ -155,23 +181,40 @@ def ai(ack, respond, command):
     respond(formatted_prompt, response_type=response_type, blocks=blocks)
 
 @app.action("public_repost")
-def public_repost(ack, payload, respond, say):
+@respond_errors
+def public_repost(respond, ack, payload, say):
     """Handle 'Post publicly' button."""
     ack()
     to_repost = json.loads(payload['value'])
     say(to_repost["text"], response_type="in_channel", blocks=to_repost["blocks"])
     respond(text='', replace_original=True, delete_original=True)
 
+@app.event("app_mention")
+@respond_errors
+def handle_mention(say, ack, payload):
+    """Handle @ mention of AbbyLarby."""
+    ack()
+    handle_conversation(say, payload, is_dm=False)
+
 @app.event("message")
-def handle_dm(ack, payload, logger, say):
+@respond_errors
+def handle_dm(ack, payload, say):
     """Handle conversations with the app itself."""
     ack()
+    handle_conversation(say, payload, is_dm=True)
 
-    users_in_convo = {id: id_to_user_info(id) for id in [payload['user'], my_user_id]}
+def handle_conversation(say, payload, is_dm=False):
+    users_in_convo = {my_user_id: id_to_user_info(my_user_id)}
     my_user_info = users_in_convo[my_user_id]
+    latest_message = hydrate_user_ids(payload["text"])
 
-    latest_message = payload["text"]
-    if latest_message == "help":
+    # if we were mentioned in a thread, say() should respond in the thread
+    if 'thread_ts' in payload:
+        wrapped_say = say
+        say = lambda *args, **kwargs: wrapped_say(*args, **kwargs, thread_ts=payload["thread_ts"])
+
+    # handle 'help' command
+    if is_command(latest_message, "help", is_dm):
         say(dedent(f"""
             I'm {my_user_info['first_name']}, a friendly, helpful AI bot. You can just talk to me, or I'll do special things if you send one of these messages:
             * `reset`: I'll ignore anything we said before this message.
@@ -179,26 +222,37 @@ def handle_dm(ack, payload, logger, say):
         """))
         return
 
-    if latest_message == "reset":
-        say(f"Hi! I'm {my_user_info['first_name']}.")
+    # handle 'reset' command
+    if is_command(latest_message, "reset", is_dm):
+        if is_dm:
+            say(f"Hi! I'm {my_user_info['first_name']}.")
         return
 
     # fetch previous slack messages in conversation, and turn into prompts
+    if 'thread_ts' in payload:
+        messages = app.client.conversations_replies(channel=payload["channel"], ts=payload["thread_ts"])
+        messages = reversed(messages.data["messages"])
+    else:
+        messages = app.client.conversations_history(channel=payload["channel"])
+        messages = messages.data["messages"]
     prompt_messages = []
     chars_remaining = 2000
-    messages = app.client.conversations_history(channel=payload["channel"])
-    messages = messages.data["messages"]
     for message in messages:
+        if not 'user' in message:
+            continue
+        users_in_convo[message['user']] = user_info = id_to_user_info(message['user'])
         role = 'assistant' if message['user'] == my_user_id else 'user'
-        content = message['text']
+        content = hydrate_user_ids(message['text'])
 
         # handle reset keyword
-        if message['text'] == "reset":
+        if is_command(content, "reset", is_dm):
             break
 
         # skip previous prompt inspections
-        if content == "prompt" or (role == 'assistant' and content.startswith('```')):
+        if is_command(content, "prompt", is_dm) or (role == 'assistant' and content.startswith('```')):
             continue
+
+        content = f"{user_info['first_name']} [name_separator] {content}"
 
         # enforce length limit -- excessive prompt length will cause API error
         chars_remaining -= len(content)
@@ -212,7 +266,7 @@ def handle_dm(ack, payload, logger, say):
 
     # list of user bios
     bios = "* " + "\n*".join(
-        f'First name: {user_info["first_name"]}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
+        f'First name: {user_info["first_name"]}. This person also goes by: {user_info["display_name"]}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
         for user_id, user_info in users_in_convo.items() if user_id != my_user_id
     )
 
@@ -221,16 +275,21 @@ def handle_dm(ack, payload, logger, say):
 You are {my_user_info['first_name']}, a friendly, helpful AI bot.
 Today is {date.today().strftime("%A, %B %-d, %Y.")}
 
-You can refer to the user by name. This is what you know about the user:
+You can refer to users by name. This is what you know about the users:
 {bios}
-You should not invent any other users! You're only talking to this user.""".strip()})
+You should not invent any other users! You're only talking to these users.
 
-    if latest_message == "prompt":
+User names will be separated from their comments by [name_separator].
+""".strip()})
+
+    if is_command(latest_message, "prompt", is_dm):
         response = '```'+json.dumps(prompt_messages, indent=4).replace('```', '')+'```'
     else:
         response = get_text(prompt_messages)
+        response = response.rsplit('[name_separator]', 1)[-1]
 
     say(response, response_type="in_channel")
+
 
 if __name__ == "__main__":
     handler = SocketModeHandler(app)
