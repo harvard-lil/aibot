@@ -4,6 +4,7 @@ import os
 import logging
 import re
 import time
+import traceback
 from datetime import date
 from textwrap import dedent
 
@@ -109,7 +110,7 @@ def respond_errors(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            err_str = f"```Exception handling request:\n{e}\n```"
+            err_str = f"```Exception handling request:\n{traceback.format_exc()}\n```"
             if 'respond' in kwargs:
                 kwargs['respond'](err_str, response_type="ephemeral")
             elif 'say' in kwargs:
@@ -243,6 +244,8 @@ def handle_conversation(say, payload, is_dm=False):
         users_in_convo[message['user']] = user_info = id_to_user_info(message['user'])
         role = 'assistant' if message['user'] == my_user_id else 'user'
         content = hydrate_user_ids(message['text'])
+        if not content.strip():
+            continue
 
         # handle reset keyword
         if is_command(content, "reset", is_dm):
@@ -252,7 +255,7 @@ def handle_conversation(say, payload, is_dm=False):
         if is_command(content, "prompt", is_dm) or (role == 'assistant' and content.startswith('```')):
             continue
 
-        content = f"{user_info['first_name']} [name_separator] {content}"
+        content = f"{user_info.get('first_name', user_info['real_name'])} [name_separator] {content}"
 
         # enforce length limit -- excessive prompt length will cause API error
         chars_remaining -= len(content)
@@ -266,7 +269,7 @@ def handle_conversation(say, payload, is_dm=False):
 
     # list of user bios
     bios = "* " + "\n*".join(
-        f'First name: {user_info["first_name"]}. This person also goes by: {user_info["display_name"]}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
+        f'First name: {user_info.get("first_name", user_info.get("real_name"))}. This person also goes by: {user_info.get("display_name")}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
         for user_id, user_info in users_in_convo.items() if user_id != my_user_id
     )
 
