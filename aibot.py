@@ -18,12 +18,12 @@ app = App()
 my_user_id = app.client.auth_test().data["user_id"]
 openai.api_key = os.getenv('OPENAI_API_KEY')
 OPENAI_TEXT_PARAMS = {
-    'model': "text-davinci-003",
+    'model': "gpt-3.5-turbo",
     'temperature': 0.7,
-    'max_tokens': 250,
-    'top_p': 1,
-    'frequency_penalty': 0,
-    'presence_penalty': 0,
+    # 'max_tokens': 250,
+    # 'top_p': 1,
+    # 'frequency_penalty': 0,
+    # 'presence_penalty': 0,
 }
 OPENAI_IMG_PARAMS = {
     "n": 1,
@@ -36,10 +36,15 @@ cached_team_fields = {}
 
 ### helpers ###
 
-def get_text(prompt, **extra_params):
-    response = openai.Completion.create(prompt=prompt, **{**OPENAI_TEXT_PARAMS, **extra_params})
+def get_text(messages, **extra_params):
+    if type(messages) is str:
+        messages = [{"role": "user", "content": messages}]
+    response = openai.ChatCompletion.create(
+        messages=messages,
+        **{**OPENAI_TEXT_PARAMS, **extra_params}
+    )
     logger.debug(f"OpenAI response: {response}")
-    return response.choices[0].text.strip().strip('"')
+    return response['choices'][0]['message']['content']
 
 def get_image(prompt, **extra_params):
     response = openai.Image.create(prompt=prompt, **{**OPENAI_IMG_PARAMS, **extra_params})
@@ -66,12 +71,9 @@ def id_to_user_info(user_id):
         if not cached_team_fields:
             team_profile = app.client.team_profile_get()
             cached_team_fields.update({f["id"]: f["label"] for f in team_profile["profile"]["fields"]})
-        user_profile = app.client.users_profile_get(user=user_id)["profile"]
-        user_info = {k: user_profile.get(k) for k in ['real_name', 'display_name', 'first_name', 'last_name', 'title', 'status_text', 'status_emoji', 'pronouns']}
+        user_info = app.client.users_profile_get(user=user_id)["profile"]
         for label_id, label in cached_team_fields.items():
-            user_info[label] = user_profile["fields"].get(label_id, {'value': ''})['value']
-        # privacy filter -- ignore all but these fields
-        user_info = {k: v for k, v in user_info.items() if v and k in ['first_name', 'pronouns', 'Info for AbbyLarby']}
+            user_info[label] = user_info["fields"].get(label_id, {'value': ''})['value']
         cached_user_info[user_id] = user_info
 
     return cached_user_info[user_id]
@@ -177,54 +179,56 @@ def handle_dm(ack, payload, logger, say):
         """))
         return
 
-    # fetch previous slack messages in conversation, and turn into prompts like "<User Name | 3 minutes ago>: message"
-    formatted_messages = []
-    if latest_message != "reset":
-        messages = app.client.conversations_history(channel=payload["channel"])
-        messages = messages.data["messages"]
-        for message in messages:
-            if message['text'] == "reset":
-                break
-            if message['text'] == "prompt" or (message['user'] == my_user_id and message['text'].startswith('```')):
-                # skip previous prompt inspections
-                continue
-            user_info = users_in_convo[message["user"]] = id_to_user_info(message['user'])
-            user_name = user_info['first_name']
-            readable_age = readable_timedelta(time.time() - int(float(message["ts"])))
-            formatted_messages.append(f"<{user_name} | {readable_age} ago>: {message['text']}")
+    if latest_message == "reset":
+        say(f"Hi! I'm {my_user_info['first_name']}.")
+        return
 
-    # list of stop tokens to stop it from generating replies to itself
-    stop_tokens = [f"<{user_info['first_name']} |" for user_info in users_in_convo.values()]
+    # fetch previous slack messages in conversation, and turn into prompts
+    prompt_messages = []
+    chars_remaining = 2000
+    messages = app.client.conversations_history(channel=payload["channel"])
+    messages = messages.data["messages"]
+    for message in messages:
+        role = 'assistant' if message['user'] == my_user_id else 'user'
+        content = message['text']
+
+        # handle reset keyword
+        if message['text'] == "reset":
+            break
+
+        # skip previous prompt inspections
+        if content == "prompt" or (role == 'assistant' and content.startswith('```')):
+            continue
+
+        # enforce length limit -- excessive prompt length will cause API error
+        chars_remaining -= len(content)
+        if chars_remaining <= 0:
+            break
+
+        prompt_messages.append({"role": role, "content": content})
+
+    # we go through messages backwards to the start, so end up with messages in reverse order
+    prompt_messages.reverse()
 
     # list of user bios
     bios = "* " + "\n*".join(
-        user_info["first_name"] + ": " +
-        " ".join(f'{k} is "{v}".' for k, v in user_info.items() if k != "first_name")
-        for user_info in users_in_convo.values()
+        f'First name: {user_info["first_name"]}. Pronouns: {user_info["pronouns"]}. What you know about this user: "{user_info["Info for AbbyLarby"]}"'
+        for user_id, user_info in users_in_convo.items() if user_id != my_user_id
     )
 
-    # list of messages
-    max_prompt_length = 2000  # characters
-    history_text = ""
-    for message in formatted_messages:
-        history_text = f"\n{message}{history_text}"
-        if len(history_text) > max_prompt_length:
-            break
-
-    # fetch OpenAI response
-    prompt = f"""
-This is a conversation with {my_user_info['first_name']}, a friendly, helpful AI bot.
+    # add system prompt
+    prompt_messages.insert(0, {"role": "system", "content": f"""
+You are {my_user_info['first_name']}, a friendly, helpful AI bot.
 Today is {date.today().strftime("%A, %B %-d, %Y.")}
 
-These are the people in the conversation:
+You can refer to the user by name. This is what you know about the user:
 {bios}
-{history_text}
-<{my_user_info['first_name']} | now>:
-    """.strip()
+You should not invent any other users! You're only talking to this user.""".strip()})
+
     if latest_message == "prompt":
-        response = f"```{prompt.replace('```', '')}```"
+        response = '```'+json.dumps(prompt_messages, indent=4).replace('```', '')+'```'
     else:
-        response = get_text(prompt, stop=list(stop_tokens))
+        response = get_text(prompt_messages)
 
     say(response, response_type="in_channel")
 
