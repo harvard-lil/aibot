@@ -15,6 +15,8 @@ Available commands:
 
 Have a longer conversation by talking directly with the bot in the app Messages tab.
 
+The bot can also be added to any channel, and then will respond to @ mentions.
+
 # Dev setup
 
 (lazy requirements for now)
