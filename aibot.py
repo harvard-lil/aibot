@@ -15,6 +15,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import openai
 from dotenv import load_dotenv
+from slack_sdk.errors import SlackApiError
 
 # setup
 logging.basicConfig(level=logging.DEBUG)
@@ -91,7 +92,11 @@ def get_team_fields():
 @ttl_cache(60)
 def id_to_user_info(user_id):
     team_fields = get_team_fields()
-    user_info = app.client.users_profile_get(user=user_id)["profile"]
+    try:
+        user_info = app.client.users_profile_get(user=user_id)["profile"]
+    except SlackApiError:
+        # for unknown user (typically cross-slack convo), just say "unknown" for now
+        return {"first_name": "Unknown Name", "real_name": "Unknown Name", "display_name": "Unknown Name"}
     for label_id, label in team_fields.items():
         user_info[label] = user_info["fields"].get(label_id, {'value': ''})['value']
     return user_info
