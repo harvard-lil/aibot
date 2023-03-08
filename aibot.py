@@ -1,3 +1,4 @@
+import datetime
 import functools
 import json
 import os
@@ -8,6 +9,7 @@ import traceback
 from datetime import date
 from textwrap import dedent
 
+from pyquery import PyQuery
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import openai
@@ -32,12 +34,26 @@ OPENAI_IMG_PARAMS = {
     "n": 1,
     "size": "1024x1024",
 }
-cache_seconds = 60
-cache_last_reset = 0
-cached_user_info = {}
-cached_team_fields = {}
+BOT_NAME = os.getenv('BOT_NAME', 'AbbyLarby')
+HIDDEN_PROMPT_URL = os.getenv('HIDDEN_PROMPT_URL')
 
 ### helpers ###
+
+def ttl_cache(seconds=60):
+    """ via https://stackoverflow.com/a/50866968/307769 """
+    ttl = datetime.timedelta(seconds=seconds)
+    def wrap(func):
+        cache = {}
+        @functools.wraps(func)
+        def wrapped(*args, **kw):
+            now = datetime.datetime.now()
+            key = tuple(args), frozenset(kw.items())
+            if key not in cache or now - cache[key][0] > ttl:
+                value = func(*args, **kw)
+                cache[key] = (now, value)
+            return cache[key][1]
+        return wrapped
+    return wrap
 
 def get_text(messages, **extra_params):
     if type(messages) is str:
@@ -61,25 +77,28 @@ def block_text(text):
         "text": text,
     }
 
+@ttl_cache(60*60)
+def get_team_fields():
+    team_profile = app.client.team_profile_get()
+    return {f["id"]: f["label"] for f in team_profile["profile"]["fields"]}
+
+@ttl_cache(60)
 def id_to_user_info(user_id):
-    global cache_last_reset
+    team_fields = get_team_fields()
+    user_info = app.client.users_profile_get(user=user_id)["profile"]
+    for label_id, label in team_fields.items():
+        user_info[label] = user_info["fields"].get(label_id, {'value': ''})['value']
+    return user_info
 
-    # reset cache every cache_seconds seconds
-    if cache_last_reset < time.time() - cache_seconds:
-        cache_last_reset = time.time()
-        cached_user_info.clear()
-
-    # fetch data for this user if not cached
-    if user_id not in cached_user_info:
-        if not cached_team_fields:
-            team_profile = app.client.team_profile_get()
-            cached_team_fields.update({f["id"]: f["label"] for f in team_profile["profile"]["fields"]})
-        user_info = app.client.users_profile_get(user=user_id)["profile"]
-        for label_id, label in cached_team_fields.items():
-            user_info[label] = user_info["fields"].get(label_id, {'value': ''})['value']
-        cached_user_info[user_id] = user_info
-
-    return cached_user_info[user_id]
+@ttl_cache(60*5)
+def get_hidden_prompt():
+    if HIDDEN_PROMPT_URL:
+        doc = PyQuery(url=HIDDEN_PROMPT_URL)
+        prompt = "\n\n".join(text for p in doc('p').items() if (text := p.text().strip()) != "" and not text.startswith('#')).strip()
+        if not prompt:
+            raise ValueError(f"No prompt found in HIDDEN_PROMPT_URL.")
+        return prompt
+    return f"You are {BOT_NAME}, a friendly, helpful AI bot."
 
 def hydrate_user_ids(text):
     def id_to_name(m):
@@ -206,7 +225,6 @@ def handle_dm(ack, payload, say):
 
 def handle_conversation(say, payload, is_dm=False):
     users_in_convo = {my_user_id: id_to_user_info(my_user_id)}
-    my_user_info = users_in_convo[my_user_id]
     latest_message = hydrate_user_ids(payload["text"])
 
     # if we were mentioned in a thread, say() should respond in the thread
@@ -217,7 +235,7 @@ def handle_conversation(say, payload, is_dm=False):
     # handle 'help' command
     if is_command(latest_message, "help", is_dm):
         say(dedent(f"""
-            I'm {my_user_info['first_name']}, a friendly, helpful AI bot. You can just talk to me, or I'll do special things if you send one of these messages:
+            I'm {BOT_NAME}, a friendly, helpful AI bot. You can just talk to me, or I'll do special things if you send one of these messages:
             * `reset`: I'll ignore anything we said before this message.
             * `prompt`: I'll show the entire prompt I would have used to generate a response.
         """))
@@ -226,7 +244,7 @@ def handle_conversation(say, payload, is_dm=False):
     # handle 'reset' command
     if is_command(latest_message, "reset", is_dm):
         if is_dm:
-            say(f"Hi! I'm {my_user_info['first_name']}.")
+            say(f"Hi! I'm {BOT_NAME}.")
         return
 
     # fetch previous slack messages in conversation, and turn into prompts
@@ -275,7 +293,8 @@ def handle_conversation(say, payload, is_dm=False):
 
     # add system prompt
     prompt_messages.insert(0, {"role": "system", "content": f"""
-You are {my_user_info['first_name']}, a friendly, helpful AI bot.
+{get_hidden_prompt()}
+
 Today is {date.today().strftime("%A, %B %-d, %Y.")}
 
 You can refer to users by name. This is what you know about the users:

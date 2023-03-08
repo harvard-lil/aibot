@@ -17,6 +17,13 @@ Have a longer conversation by talking directly with the bot in the app Messages 
 
 The bot can also be added to any channel, and then will respond to @ mentions.
 
+## Conversation bot hidden URL
+
+The conversation bot can fetch a hidden prompt from any URL stored in `HIDDEN_PROMPT_URL`.
+All paragraph tags, whose text does not start with `#`, will be included as paragraphs at the
+start of the hidden prompt. The URL will be refetched once every five minutes. A Google Doc
+that is published to the web works well as a hidden prompt URL.
+
 # Dev setup
 
 (lazy requirements for now)
