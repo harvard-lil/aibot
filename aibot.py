@@ -318,12 +318,16 @@ def handle_conversation(say, payload, is_dm=False):
     prompt_messages.insert(0, {"role": "system", "content": system_prompt})
 
     if is_command(latest_message, "prompt", is_dm):
-        response = '```'+json.dumps(prompt_messages, indent=4).replace('```', '')+'```'
+        response = json.dumps(prompt_messages, indent=4)
+        app.client.files_upload(
+            channels=payload["channel"],
+            filename="prompt.json",
+            content=response,
+        )
     else:
         response = get_text(prompt_messages)
         response = response.rsplit('[name_separator]', 1)[-1]
-
-    say(response, response_type="in_channel")
+        say(response, response_type="in_channel")
 
 
 if __name__ == "__main__":
