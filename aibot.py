@@ -9,6 +9,7 @@ import traceback
 from datetime import date
 from textwrap import dedent
 
+import tiktoken
 from pyquery import PyQuery
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -30,14 +31,19 @@ OPENAI_TEXT_PARAMS = {
     # 'frequency_penalty': 0,
     # 'presence_penalty': 0,
 }
+MODEL_MAX_TOKENS = 4096
 OPENAI_IMG_PARAMS = {
     "n": 1,
     "size": "1024x1024",
 }
 BOT_NAME = os.getenv('BOT_NAME', 'AbbyLarby')
 HIDDEN_PROMPT_URL = os.getenv('HIDDEN_PROMPT_URL')
+tokenizer = tiktoken.encoding_for_model(OPENAI_TEXT_PARAMS['model'])
 
 ### helpers ###
+
+def get_token_count(s):
+    return len(tokenizer.encode(s))
 
 def ttl_cache(seconds=60):
     """ via https://stackoverflow.com/a/50866968/307769 """
@@ -136,6 +142,20 @@ def respond_errors(func):
                 kwargs['say'](err_str)
             raise
     return wrapper
+
+def get_system_prompt(bios):
+    bios = '\n* '.join(bios.values())
+    return f"""
+{get_hidden_prompt()}
+
+Today is {date.today().strftime("%A, %B %-d, %Y.")}
+
+You can refer to users by name. This is what you know about the users:
+* {bios}
+You should not invent any other users! You're only talking to these users.
+
+User names will be separated from their comments by [name_separator].
+""".strip()
 
 ### views ###
 
@@ -255,12 +275,21 @@ def handle_conversation(say, payload, is_dm=False):
         messages = app.client.conversations_history(channel=payload["channel"])
         messages = messages.data["messages"]
     prompt_messages = []
-    chars_remaining = 2000
+    tokens_remaining = int(MODEL_MAX_TOKENS * .75)
+    bios = {}
+    system_prompt = get_system_prompt(bios)
     for message in messages:
         if not 'user' in message:
             continue
         users_in_convo[message['user']] = user_info = id_to_user_info(message['user'])
-        role = 'assistant' if message['user'] == my_user_id else 'user'
+        if message['user'] == my_user_id:
+            role = 'assistant'
+        else:
+            role = 'user'
+            if message['user'] not in bios:
+                # recalculate system_prompt each time we add a new user, so we can accurately check token count
+                bios[message['user']] = f'First name: {user_info.get("first_name", user_info.get("real_name"))}. This person also goes by: {user_info.get("display_name")}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
+                system_prompt = get_system_prompt(bios)
         content = hydrate_user_ids(message['text'])
         if not content.strip():
             continue
@@ -270,14 +299,14 @@ def handle_conversation(say, payload, is_dm=False):
             break
 
         # skip previous prompt inspections
-        if is_command(content, "prompt", is_dm) or (role == 'assistant' and content.startswith('```')):
+        if is_command(content, "prompt", is_dm):
             continue
 
         content = f"{user_info.get('first_name', user_info['real_name'])} [name_separator] {content}"
 
         # enforce length limit -- excessive prompt length will cause API error
-        chars_remaining -= len(content)
-        if chars_remaining <= 0:
+        tokens_remaining -= get_token_count(content)
+        if tokens_remaining - get_token_count(system_prompt) <= 0:
             break
 
         prompt_messages.append({"role": role, "content": content})
@@ -285,32 +314,20 @@ def handle_conversation(say, payload, is_dm=False):
     # we go through messages backwards to the start, so end up with messages in reverse order
     prompt_messages.reverse()
 
-    # list of user bios
-    bios = "* " + "\n*".join(
-        f'First name: {user_info.get("first_name", user_info.get("real_name"))}. This person also goes by: {user_info.get("display_name")}. Pronouns: {user_info.get("pronouns", "they/them")}. What you know about this user: "{user_info.get("Info for AbbyLarby", "they like ducks!")}"'
-        for user_id, user_info in users_in_convo.items() if user_id != my_user_id
-    )
-
     # add system prompt
-    prompt_messages.insert(0, {"role": "system", "content": f"""
-{get_hidden_prompt()}
-
-Today is {date.today().strftime("%A, %B %-d, %Y.")}
-
-You can refer to users by name. This is what you know about the users:
-{bios}
-You should not invent any other users! You're only talking to these users.
-
-User names will be separated from their comments by [name_separator].
-""".strip()})
+    prompt_messages.insert(0, {"role": "system", "content": system_prompt})
 
     if is_command(latest_message, "prompt", is_dm):
-        response = '```'+json.dumps(prompt_messages, indent=4).replace('```', '')+'```'
+        response = json.dumps(prompt_messages, indent=4)
+        app.client.files_upload(
+            channels=payload["channel"],
+            filename="prompt.json",
+            content=response,
+        )
     else:
         response = get_text(prompt_messages)
         response = response.rsplit('[name_separator]', 1)[-1]
-
-    say(response, response_type="in_channel")
+        say(response, response_type="in_channel")
 
 
 if __name__ == "__main__":
