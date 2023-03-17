@@ -17,12 +17,18 @@ Have a longer conversation by talking directly with the bot in the app Messages 
 
 The bot can also be added to any channel, and then will respond to @ mentions.
 
-## Conversation bot hidden URL
+# Configuration
 
-The conversation bot can fetch a hidden prompt from any URL stored in `HIDDEN_PROMPT_URL`.
-All paragraph tags, whose text does not start with `#`, will be included as paragraphs at the
-start of the hidden prompt. The URL will be refetched once every five minutes. A Google Doc
-that is published to the web works well as a hidden prompt URL.
+Configuration is via the environment variables set in `.env.example`. You can copy the file to `.env` or set environment
+variables another way.
+
+* `MODEL`: a model using the OpenAI chat API, e.g. "gpt-4" or "gpt-3.5-turbo".
+* `MODEL_MAX_TOKENS`: the maximum number of tokens allowed by the given model. For cost, it may be useful to set this
+  lower than the actual max, as a long conversation or a question in a long public channel can generate a lot of context.
+* `HIDDEN_PROMPT_URL`: A url containing text to provide as the system prompt to the bot.
+  All paragraph tags, whose text does not start with `#`, will be included as paragraphs at the
+  start of the hidden prompt. The URL will be refetched once every five minutes. A Google Doc
+  that is published to the web works well as a hidden prompt URL.
 
 # Dev setup
 

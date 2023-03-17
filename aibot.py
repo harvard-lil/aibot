@@ -25,14 +25,14 @@ app = App()
 my_user_id = app.client.auth_test().data["user_id"]
 openai.api_key = os.getenv('OPENAI_API_KEY')
 OPENAI_TEXT_PARAMS = {
-    'model': "gpt-3.5-turbo",
+    'model': os.getenv("MODEL", "gpt-4"),
     'temperature': 0.7,
     # 'max_tokens': 250,
     # 'top_p': 1,
     # 'frequency_penalty': 0,
     # 'presence_penalty': 0,
 }
-MODEL_MAX_TOKENS = 4096
+MODEL_MAX_TOKENS = int(os.getenv('MODEL_MAX_TOKENS', '4096'))
 OPENAI_IMG_PARAMS = {
     "n": 1,
     "size": "1024x1024",
@@ -323,7 +323,7 @@ def handle_conversation(say, payload, is_dm=False):
     prompt_messages.insert(0, {"role": "system", "content": system_prompt})
 
     if is_command(latest_message, "prompt", is_dm):
-        response = json.dumps(prompt_messages, indent=4)
+        response = json.dumps(OPENAI_TEXT_PARAMS, indent=4)+"\n\n"+json.dumps(prompt_messages, indent=4)
         app.client.files_upload(
             channels=payload["channel"],
             filename="prompt.json",

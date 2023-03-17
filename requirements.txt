@@ -1,6 +1,6 @@
-openai==0.27.0
+openai==0.27.2
 slack-bolt==1.16.0
 watchdog==2.2.0
 python-dotenv==0.21.0
 pyquery==2.0.0
-tiktoken==0.3.0
+tiktoken==0.3.2
